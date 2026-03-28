@@ -200,7 +200,7 @@ private:
     // ----- internals -----
     void _registerRoutes();
     void _populateCurrent(httpd_req_t *req, const RouteEntry &route);
-    void _killZombieTasks();
+    void _killHttpdZombieTasks();
 
     static std::string               _translateUri(const std::string &p, bool &hasArg);
     static std::vector<std::string>  _extractPathArgs(const std::string &pattern,
