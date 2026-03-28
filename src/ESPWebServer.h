@@ -165,6 +165,7 @@ private:
     // ----- server & rute -----
     httpd_handle_t          _server = nullptr;
     std::vector<RouteEntry> _routes;
+    std::vector<RouteEntry> _loginRoutes;
     WebHandler0             _notFoundHandler;
 
     // ----- starea request-ului curent -----
@@ -199,6 +200,7 @@ private:
     // ----- internals -----
     void _registerRoutes();
     void _populateCurrent(httpd_req_t *req, const RouteEntry &route);
+    void _killZombieTasks();
 
     static std::string               _translateUri(const std::string &p, bool &hasArg);
     static std::vector<std::string>  _extractPathArgs(const std::string &pattern,
