@@ -11,6 +11,7 @@
 #include <ctime>
 #include <iomanip>
 #include <sstream>
+#include <task.h>
 
 static const char *TAG_WEB = "ESPWebServer";
 
@@ -76,7 +77,7 @@ void ESPWebServer::setAuthMode(AuthMode mode)
     _authMode = mode;
     _loginRoutes.clear();
     _authExclude.clear();
-    ESP_LOGI(TAG_WEB, "setAuthMode");
+    ESP_LOGI(TAG_WEB, "setAuthMode:%d", _authMode);
 
     if (_authMode == AuthMode::Session)
     {
@@ -216,6 +217,7 @@ void ESPWebServer::stop()
     ESP_LOGI(TAG_WEB, "Try Stop");
     httpd_stop(_server);
     _server = nullptr;
+    vTaskDelay(pdMS_TO_TICKS(10));
     _killHttpdZombieTasks();
     ESP_LOGI(TAG_WEB, "Stopped");
 }
@@ -556,13 +558,18 @@ uint32_t ESPWebServer::_now() const
 
 void ESPWebServer::_registerRoutes()
 {
-    std::vector<RouteEntry> allRoutes;
-    allRoutes.insert(_routes.end(), _loginRoutes.begin(), _loginRoutes.end());
+    std::vector<RouteEntry> allRoutes = _routes;
+    allRoutes.insert(allRoutes.end(), _loginRoutes.begin(), _loginRoutes.end());
 
-    for (size_t i = 0; i < allRoutes.size(); ++i)
+    size_t count = allRoutes.size();
+    ESP_LOGI(TAG_WEB, "Register routes, count:%d",count);
+
+    for (size_t i = 0; i < count ; ++i)
     {
         httpd_uri_t uri = {};
-        uri.uri = allRoutes[i].uriEsp.c_str();
+        const char* uriEsp = allRoutes[i].uriEsp.c_str();
+        ESP_LOGI(TAG_WEB, "Register route: %s",uriEsp);
+        uri.uri = uriEsp;
         uri.method = allRoutes[i].method;
         uri.handler = _dispatch;
         uri.user_ctx = reinterpret_cast<void *>(i);
@@ -1379,21 +1386,18 @@ void ESPWebServer::endBinary()
 void ESPWebServer::_killHttpdZombieTasks()
 {
     ESP_LOGI(TAG_WEB, "Try _killHttpdZombieTasks");
-    UBaseType_t count = uxTaskGetNumberOfTasks();
-    TaskStatus_t list = (TaskStatus_t)malloc(count * sizeof(TaskStatus_t));
 
-    count = uxTaskGetSystemState(list, count, NULL);
-
-    ESP_LOGI(TAG_WEB, "HttpdZombieTasks count:%d", count);
-
-    for (int i = 0; i < count; i++)
+    for(int i = 0 ; i < 5 ; i ++)
     {
-        if (strstr(list[i].pcTaskName, "httpd"))
+        TaskHandle_t h = xTaskGetHandle("httpd");
+        if (h != nullptr) 
         {
-            Serial.printf("Killing zombie httpd: %p\n", list[i].xHandle);
-            vTaskDelete(list[i].xHandle);
+            vTaskDelete(h);
+            vTaskDelay(pdMS_TO_TICKS(5));
+        }
+        else
+        {
+            return;
         }
     }
-
-    free(list);
 }
