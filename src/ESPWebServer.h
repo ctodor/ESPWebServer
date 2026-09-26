@@ -133,6 +133,14 @@ private:
     uint8_t  _recvTimeout;
     uint8_t  _sendTimeout;
 
+    // Plafon pentru body-ul cererilor normale (non-OTA). Protejeaza impotriva
+    // unui Content-Length urias care ar aloca/consuma tot heap-ul, chiar
+    // inainte de autentificare. OTA are propria cale (_handleOtaUpload).
+    static constexpr size_t kMaxBodySize = 32 * 1024;
+    // Numar maxim de timeout-uri consecutive pe recv inainte de a abandona
+    // (cu recv_wait_timeout implicit de cateva secunde => cateva zeci de sec).
+    static constexpr int    kMaxRecvTimeouts = 4;
+
     // ----- auth config -----
     AuthMode    _authMode        = AuthMode::None;
     bool        _authRequired    = false;
@@ -169,6 +177,11 @@ private:
     WebHandler0             _notFoundHandler;
 
     // ----- starea request-ului curent -----
+    // IMPORTANT: _current este o structura UNICA, partajata (nu per-request).
+    // Este corecta doar pentru ca esp_http_server proceseaza cererile SERIAL,
+    // intr-un singur task. Acelasi lucru pentru bufferul static din beginBinary().
+    // Daca vreodata configurezi httpd cu handling concurent, _current devine
+    // data race si trebuie mutata pe request (req->sess_ctx / thread-local).
     struct CurrentRequest {
         httpd_req_t                       *req           = nullptr;
         http_method                        method        = HTTP_GET;
@@ -199,7 +212,9 @@ private:
 
     // ----- internals -----
     void _registerRoutes();
-    void _populateCurrent(httpd_req_t *req, const RouteEntry &route);
+    // Intoarce true daca cererea poate fi procesata; false daca a fost deja
+    // respinsa (ex. body peste kMaxBodySize -> 413) si handler-ul trebuie sarit.
+    bool _populateCurrent(httpd_req_t *req, const RouteEntry &route);
     void _killHttpdZombieTasks();
 
     static std::string               _translateUri(const std::string &p, bool &hasArg);

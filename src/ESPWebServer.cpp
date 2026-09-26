@@ -627,7 +627,7 @@ void ESPWebServer::_registerRoutes()
     }
 }
 
-void ESPWebServer::_populateCurrent(httpd_req_t *req, const RouteEntry &route)
+bool ESPWebServer::_populateCurrent(httpd_req_t *req, const RouteEntry &route)
 {
     _current.req = req;
     _current.method = (http_method)req->method;
@@ -641,19 +641,54 @@ void ESPWebServer::_populateCurrent(httpd_req_t *req, const RouteEntry &route)
     size_t qpos = fullUri.find('?');
     _current.uri = (qpos != std::string::npos) ? fullUri.substr(0, qpos) : fullUri;
 
+    // Body prea mare pentru o ruta normala -> respinge inainte de a aloca.
+    // Ruleaza inainte de auth, deci opreste si un client neautentificat care
+    // ar trimite un Content-Length urias (protectie anti memory-exhaustion).
+    if (req->content_len > kMaxBodySize)
+    {
+        ESP_LOGW(TAG_WEB, "Body too large: %u > %u",
+                 (unsigned)req->content_len, (unsigned)kMaxBodySize);
+        httpd_resp_set_status(req, "413 Payload Too Large");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "Payload too large", HTTPD_RESP_USE_STRLEN);
+        return false;
+    }
+
+    // Citeste body-ul in bucla (httpd_req_recv poate intoarce mai putin decat
+    // s-a cerut - un segment TCP), cu numar marginit de timeout-uri.
     if (req->content_len > 0)
     {
-        char *buf = new char[req->content_len];
-        int received = httpd_req_recv(req, buf, req->content_len);
-        if (received > 0)
-            _current.body.assign(buf, (size_t)received);
-        delete[] buf;
+        _current.body.reserve(req->content_len);
+        char tmp[512];
+        size_t remaining = req->content_len;
+        int timeouts = 0;
+        while (remaining > 0)
+        {
+            size_t toRead = remaining < sizeof(tmp) ? remaining : sizeof(tmp);
+            int received = httpd_req_recv(req, tmp, toRead);
+            if (received == HTTPD_SOCK_ERR_TIMEOUT)
+            {
+                if (++timeouts > kMaxRecvTimeouts)
+                {
+                    ESP_LOGW(TAG_WEB, "Body recv: prea multe timeout-uri, abort");
+                    break;
+                }
+                continue;
+            }
+            if (received <= 0)
+                break; // eroare sau conexiune inchisa
+            timeouts = 0;
+            _current.body.append(tmp, (size_t)received);
+            remaining -= (size_t)received;
+        }
     }
 
     _current.params = _parseParams(req, _current.body);
 
     if (route.hasPathArg)
         _current.pathArgs = _extractPathArgs(route.uriPattern, _current.uri);
+
+    return true;
 }
 
 esp_err_t ESPWebServer::_dispatch(httpd_req_t *req)
@@ -666,12 +701,13 @@ esp_err_t ESPWebServer::_dispatch(httpd_req_t *req)
         return ESP_FAIL;
 
     const RouteEntry &route = _instance->_routes[routeIndex];
-    _instance->_populateCurrent(req, route);
+    if (!_instance->_populateCurrent(req, route))
+        return ESP_OK; // deja respins (ex. 413 body prea mare)
 
-    ets_printf(TAG_WEB, "dispatch uri=%s authRequired=%d authMode=%d",
-               _instance->_current.uri.c_str(),
-               (int)_instance->_authRequired,
-               (int)_instance->_authMode);
+    ESP_LOGD(TAG_WEB, "dispatch uri=%s authRequired=%d authMode=%d",
+             _instance->_current.uri.c_str(),
+             (int)_instance->_authRequired,
+             (int)_instance->_authMode);
 
     // verifica autentificare
     if (_instance->_authRequired || route.requireAuth)
@@ -700,7 +736,8 @@ esp_err_t ESPWebServer::_handle404(httpd_req_t *req, httpd_err_code_t)
     RouteEntry dummy{};
     dummy.hasPathArg = false;
     dummy.requireAuth = false;
-    _instance->_populateCurrent(req, dummy);
+    if (!_instance->_populateCurrent(req, dummy))
+        return ESP_OK; // deja respins (ex. 413 body prea mare)
 
     if (_instance->_authRequired)
     {
@@ -1035,6 +1072,7 @@ void ESPWebServer::_handleOtaUpload()
     char *buf = new char[BUF_SIZE];
     size_t written = 0;
     bool hasError = false;
+    int timeouts = 0; // timeout-uri consecutive fara progres
 
     while (written < totalSize)
     {
@@ -1045,8 +1083,16 @@ void ESPWebServer::_handleOtaUpload()
         {
             if (received == HTTPD_SOCK_ERR_TIMEOUT)
             {
+                // Client blocat la mijlocul upload-ului: nu reincerca la infinit,
+                // altfel worker-ul httpd si handle-ul OTA raman blocate permanent.
+                if (++timeouts > kMaxRecvTimeouts)
+                {
+                    ESP_LOGE(TAG_WEB, "OTA: prea multe timeout-uri la %zu/%zu, abort", written, totalSize);
+                    hasError = true;
+                    break;
+                }
                 ESP_LOGW(TAG_WEB, "OTA recv timeout at %zu/%zu", written, totalSize);
-                continue; // reincearca
+                continue; // reincearca (marginit)
             }
             ESP_LOGE(TAG_WEB, "OTA recv error at %zu/%zu", written, totalSize);
             hasError = true;
@@ -1059,6 +1105,8 @@ void ESPWebServer::_handleOtaUpload()
             hasError = true;
             break;
         }
+
+        timeouts = 0; // s-a primit date -> reseteaza contorul de stall
 
         // valideaza header-ul imaginii la primul chunk
         if (written == 0 && (size_t)received >= sizeof(esp_image_header_t))
