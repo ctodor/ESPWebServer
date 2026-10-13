@@ -189,7 +189,13 @@ bool ESPWebServer::start()
     config.send_wait_timeout = _sendTimeout;
     config.lru_purge_enable = true;
     config.uri_match_fn = httpd_uri_match_wildcard;
-    config.max_uri_handlers = 20;
+    // httpd aloca tabela de handlere la start, deci plafonul trebuie sa acopere
+    // toate rutele inregistrate in _registerRoutes(): cele normale, cele de login
+    // din modul Session si cele trei ale OTA.
+    const size_t neededHandlers = _routes.size() + _loginRoutes.size() +
+                                  (_otaEnabled ? kOtaRouteCount : 0);
+    config.max_uri_handlers = (uint16_t)(neededHandlers > kMinUriHandlers ? neededHandlers
+                                                                          : kMinUriHandlers);
     config.stack_size = 16000;
 
     esp_err_t err = httpd_start(&_server, &config);
@@ -556,6 +562,18 @@ uint32_t ESPWebServer::_now() const
 // Dispatch
 // ===========================================================================
 
+const RouteEntry *ESPWebServer::_routeAt(size_t index) const
+{
+    if (index < _routes.size())
+        return &_routes[index];
+
+    index -= _routes.size();
+    if (index < _loginRoutes.size())
+        return &_loginRoutes[index];
+
+    return nullptr;
+}
+
 void ESPWebServer::_registerRoutes()
 {
     std::vector<RouteEntry> allRoutes = _routes;
@@ -697,10 +715,15 @@ esp_err_t ESPWebServer::_dispatch(httpd_req_t *req)
         return ESP_FAIL;
 
     size_t routeIndex = reinterpret_cast<size_t>(req->user_ctx);
-    if (routeIndex >= _instance->_routes.size())
+
+    // user_ctx este indexul din _routes + _loginRoutes, nu doar din _routes:
+    // altfel rutele modului Session (/login, /logout) cadeau pe ESP_FAIL fara
+    // sa trimita nimic, iar browserul primea ERR_EMPTY_RESPONSE.
+    const RouteEntry *entry = _instance->_routeAt(routeIndex);
+    if (entry == nullptr)
         return ESP_FAIL;
 
-    const RouteEntry &route = _instance->_routes[routeIndex];
+    const RouteEntry &route = *entry;
     if (!_instance->_populateCurrent(req, route))
         return ESP_OK; // deja respins (ex. 413 body prea mare)
 

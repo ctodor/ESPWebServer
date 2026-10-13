@@ -140,6 +140,10 @@ private:
     // Numar maxim de timeout-uri consecutive pe recv inainte de a abandona
     // (cu recv_wait_timeout implicit de cateva secunde => cateva zeci de sec).
     static constexpr int    kMaxRecvTimeouts = 4;
+    // Rutele pe care le adauga enableOTA(): POST upload, GET pagina, GET info.
+    static constexpr size_t kOtaRouteCount   = 3;
+    // Plafon minim de handlere httpd, pastrat ca rezerva peste rutele cunoscute.
+    static constexpr size_t kMinUriHandlers  = 20;
 
     // ----- auth config -----
     AuthMode    _authMode        = AuthMode::None;
@@ -212,6 +216,11 @@ private:
 
     // ----- internals -----
     void _registerRoutes();
+
+    // Ruta aflata la indexul folosit ca user_ctx la inregistrare. Indexul merge
+    // peste concatenarea _routes + _loginRoutes, exact cum o construieste
+    // _registerRoutes(); nullptr daca indexul e in afara ei.
+    const RouteEntry *_routeAt(size_t index) const;
     // Intoarce true daca cererea poate fi procesata; false daca a fost deja
     // respinsa (ex. body peste kMaxBodySize -> 413) si handler-ul trebuie sarit.
     bool _populateCurrent(httpd_req_t *req, const RouteEntry &route);
